@@ -1,0 +1,146 @@
+---
+title: "Classification Model Development"
+author: "DZastera"
+date: "October 20, 2016"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+
+##Introduction
+
+The goal of this work is to investigate the Weight Lifting data provided by Velloso, _et al_^[Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H. Qualitative Activity Recognition of Weight Lifting Exercises. Proceedings of 4th International Conference in Cooperation with SIGCHI (Augmented Human '13) . Stuttgart, Germany: ACM SIGCHI, 2013. [link](http://groupware.les.inf.puc-rio.br/har)] in order to correctly classify several types of weight-lifting methodology.  In that study, participants wore 4 accelerometers capable of recording motion in 9 axis while they performed exercises in 5 different ways --- one correct form and four types of incorrect form (collectively, classes A-E).
+
+This analysis will use the `caret` package to perform the bulk of the work and `doMC` to speed the computation.
+
+```{r packages, message=FALSE}
+library(caret)
+library(doParallel)
+set.seed(42)
+
+# initialize multicore
+cl <- makeCluster(detectCores())
+registerDoParallel(cl)
+```
+
+##Data
+
+Data can be obtained from the [HAR website](http://groupware.les.inf.puc-rio.br/static/WLE/WearableComputing_weight_lifting_exercises_biceps_curl_variations.csv), though this analysis is using a set provided by the [Coursera](coursera.org) site.  Two data sets are available for this exploration, a `training` set and a `testing` set; only the training set will be loaded now.  The 
+
+```{r load_data, cache=TRUE}
+WLEtraining <- read.csv("pml-training.csv")
+dim(WLEtraining)
+```
+
+The training set consists of 160 variables and 19622 rows.
+
+A cursory examination reveals that several variables are mostly (>95%) `NA` or blank, so they are removed from the set.  These include all variables starting with `min`, `max`, `var`, `stddev`, `avg`, `amplitude`, `skewness`, and `kurtosis`.  This removes 100 variables.  Additionally, the first 7 variables in the set correspond to sample labeling and time-keeping; they will also be dropped for this analysis.  A quick check with `nearZeroVar()` shows that there are no more low variance variable left.
+
+```{r clean}
+WLEtraining <- WLEtraining[!grepl("^min|^max|^var|^stddev|^avg|^amplitude|^skewness|^kurtosis", names(WLEtraining))]
+WLEtraining <- WLEtraining[,8:60]
+nearZeroVar(WLEtraining)
+```
+
+`WLEtraining` now contains 52 (possibly useful) variables and a classification variable (`classe`).  Start by splitting the training set into `training` and `testing` sets for the analysis.  This `testing` set is different from the final testing set and will be used only for model verification.
+
+```{r split}
+inTrain <- createDataPartition(WLEtraining$classe, p=0.7, list=FALSE)
+training <- WLEtraining[inTrain,]
+testing  <- WLEtraining[-inTrain,]
+```
+
+##Analysis
+
+For this work, several models of varying complexity will be explored.  In the end, the most appropriate model will be selected to move forward
+
+###Model Development
+
+The first model selected is the LDA approach.  It most certainly won't be the best model, but it's fast and should supply a good baseline for comparison.  
+
+```{r lda, message=FALSE}
+ldaMod  <- train(classe ~ . , data = training, method = "lda")
+ldaPred <- predict(ldaMod, training)
+confusionMatrix(ldaPred, training$classe)
+```
+
+LDA model accuracy is 71%.  Not great.
+
+Now, a random forest model will be developed using all of the available predictors.  This is exceptionally computationally expensive, so a subset of training is analyzed first.  
+
+```{r rf, cache=TRUE, message=FALSE}
+rfIndex <- sample(1:nrow(training),2000)
+rfSub <- training[rfIndex,]
+
+rfModel <- train(classe~., data=rfSub, method="rf")
+rfPred  <- predict(rfModel, rfSub)
+confusionMatrix(rfPred, rfSub$classe)
+```
+
+
+Using the results from the small, but wide, random forest model, the most important top 10 parameters can be extracted.
+
+```{r, message=FALSE}
+important <- varImp(rfModel)
+important <- row.names(important$importance)[1:10]
+important
+```
+
+
+These 10 parameters will be used to further develop a random forest model.  This model runs a bit faster, but still has the same accuracy on the training set.  It's almost certainly over fit to the set.
+
+```{r, cache=TRUE}
+rfModelNarrow <- train(classe~., data=training[,c(important, "classe")], method="rf")
+rfPredNarrow  <- predict(rfModelNarrow, training[,important])
+confusionMatrix(rfPredNarrow, training$classe)
+```
+
+
+Now, finally, the same random forest set is developed, though this time the data is preprocessed with the PCA function.  This preprocessing will remove any ability to interpret the results in a sensible way, but the predictive outcome will be better.
+
+```{r, cache=TRUE}
+rfModelPCA <- train(classe~., data=training, method="rf", preProcess="pca")
+rfPredPCA  <- predict(rfModelPCA, training)
+confusionMatrix(rfPredPCA, training$classe)
+```
+
+
+```{r}
+# end multicore support
+stopCluster(cl)
+```
+
+##Testing
+
+The models developed will now be tested against the `test` set that was developed at the beginning of the analysis.
+
+
+Full random forest model, no preprocessing, smaller sub sample:
+```{r}
+rfTest  <- predict(rfModel, testing)
+confusionMatrix(rfTest, testing$classe)
+```
+
+Narrow random forest model using only 10 predictors:
+```{r}
+rfTest  <- predict(rfModelNarrow, testing)
+confusionMatrix(rfTest, testing$classe)
+```
+
+Full random forest with PCA preprocessing:
+```{r}
+rfTest  <- predict(rfModelPCA, testing)
+confusionMatrix(rfTest, testing$classe)
+```
+
+##Conclusion
+
+While all of the random forest models performed well, each has their own advantages and disadvantages.  The full, sub sampled model is the easiest to implement, though the processing is extreme and computationally costly.  The 'narrow' model using only 10 predictors from the set performs worse than the wider model and retains some amount of interpretation (important, named predictors).  The final model, random forest with PCA preprocessing, is the best performing model, but is computationally expensive and retains none of the interpretation of the previous models.
+
+Based on the findings here, the out of sample error rate should be on the order of 5% for all of the random forest models, with the PCA preprocessed version perfoming sightly better.
+
+
